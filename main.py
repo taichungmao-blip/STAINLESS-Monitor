@@ -1,17 +1,17 @@
 import yfinance as yf
 import requests
-import pandas as pd
 import os
+from bs4 import BeautifulSoup
+from datetime import datetime
 
 # --- 設定區 ---
 
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
-# 改用 StockQ，它的 HTML 結構非常簡單，適合程式讀取
-# 這是 LME 鎳的專屬頁面
-NICKEL_URL = "https://www.stockq.org/raw/nickel.php"
+# 改用 Business Insider (Markets Insider)
+# 這是國際通用的原物料報價頁面，結構相對穩定
+NICKEL_URL = "https://markets.businessinsider.com/commodities/nickel-price"
 
-# 台股不銹鋼概念股
 STOCK_MAP = {
     '2027.TW': '大成鋼',
     '2034.TW': '允強',
@@ -34,59 +34,51 @@ def send_discord_message(content):
     except Exception as err:
         print(f"Discord 發送失敗: {err}")
 
-def get_nickel_price_from_stockq():
+def get_nickel_price():
     """
-    從 StockQ 讀取 LME 鎳價 (使用 pandas read_html 強力解析)
+    從 Business Insider 爬取鎳價
     """
     try:
-        # 偽裝成瀏覽器，避免被擋
+        # 偽裝成一般瀏覽器 (非常重要)
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
         }
         
-        # 1. 下載網頁內容
-        response = requests.get(NICKEL_URL, headers=headers, timeout=15)
+        response = requests.get(NICKEL_URL, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # 2. 使用 pandas 自動尋找網頁裡的所有表格
-        # StockQ 的編碼有時是 utf-8 有時是 big5，pandas 通常能自動處理，若亂碼需調整 encoding
-        dfs = pd.read_html(response.text)
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 3. 尋找包含數據的那個表格
-        # StockQ 這個頁面的主要數據通常在第一個或第二個表格
-        # 我們直接取長度夠長的那個
-        target_df = None
-        for df in dfs:
-            # 檢查表格欄位是否有 "收盤價" 或 "Close"
-            if len(df) > 1 and df.shape[1] >= 5: # 至少要有幾列幾行
-                target_df = df
-                break
+        # --- 解析邏輯 (針對 Business Insider) ---
+        # 價格通常在 class="price-section__current-value" 或類似結構
+        # 這是目前 Markets Insider 的常見結構
+        price_div = soup.find('span', class_='price-section__current-value')
         
-        if target_df is None:
-            print("找不到合適的價格表格")
+        # 如果找不到，嘗試備用 Class (網站有時會變)
+        if not price_div:
+            price_div = soup.find('span', class_='push-data')
+            
+        if not price_div:
+            print("❌ 找不到價格元素 (HTML 結構可能改變)")
             return None
+            
+        current_price = float(price_div.text.replace(',', ''))
+        
+        # 抓漲跌幅
+        # 通常在 price-section__absolute-value 或 relative-value
+        # 這裡簡化處理：如果抓不到漲跌幅，就只回傳價格
+        change_pct = 0.0
+        try:
+            # 嘗試抓取百分比
+            pct_div = soup.find('span', class_='price-section__relative-value')
+            if pct_div:
+                # 格式通常是 "-0.45%" 或 "0.45%"
+                pct_text = pct_div.text.replace('%', '').strip()
+                change_pct = float(pct_text)
+        except:
+            pass # 抓不到漲跌幅就算了，不影響主程式
 
-        # StockQ 的表格通常長這樣：
-        # Header: 日期 | 收盤價 | 漲跌 | 漲跌幅 | 開盤 | 最高 ...
-        # Row 0: 2024/05/xx | 19500 | -50 | -0.25% ...
-        
-        # 重新整理欄位名稱 (有些表格第一列是 Header)
-        target_df.columns = target_df.iloc[0] # 設定第一列為標題
-        target_df = target_df[1:] # 刪除第一列資料 (避免重複)
-
-        # 取得最新一筆資料 (通常是第一行)
-        latest_row = target_df.iloc[0]
-        
-        # 解析數據 (欄位名稱可能會變，我們用索引比較保險)
-        # index 0: 日期, 1: 收盤價, 2: 漲跌, 3: 漲跌幅
-        date_str = str(latest_row.iloc[0])
-        price_str = str(latest_row.iloc[1])
-        change_val_str = str(latest_row.iloc[2])
-        change_pct_str = str(latest_row.iloc[3]).replace('%', '')
-        
-        current_price = float(price_str.replace(',', ''))
-        change_pct = float(change_pct_str)
-        
         # 判斷趨勢
         trend_icon = "➖ 盤整"
         if change_pct > 1.0: trend_icon = "📈 轉強"
@@ -94,21 +86,18 @@ def get_nickel_price_from_stockq():
         if change_pct < -1.0: trend_icon = "📉 轉弱"
         
         return {
-            "source": "LME Nickel (StockQ)",
             "price": current_price,
             "change_pct": change_pct,
-            "change_val": change_val_str,
-            "date": date_str,
-            "trend": trend_icon
+            "trend": trend_icon,
+            "date": datetime.now().strftime('%Y-%m-%d')
         }
 
     except Exception as e:
-        print(f"爬取 StockQ 失敗: {e}")
-        # 如果 StockQ 失敗，這裡可以考慮 failover 到其他來源，目前先回報錯誤
+        print(f"爬取 Business Insider 失敗: {e}")
         return None
 
 def get_tw_stocks_status():
-    """ 獲取台股狀態 (維持不變) """
+    """ 獲取台股狀態 (保持不變) """
     table_lines = []
     header = f"{'代號':<5} {'名稱':<4} {'現價':>6}  {'漲跌幅':>7}  {'張數':>5}"
     table_lines.append(header)
@@ -121,7 +110,11 @@ def get_tw_stocks_status():
             
             if len(data) >= 1:
                 price = data['Close'].iloc[-1]
-                volume = int(data['Volume'].iloc[-1] / 1000)
+                # 容錯：如果有成交量資料才處理
+                volume = 0
+                if 'Volume' in data.columns:
+                    volume = int(data['Volume'].iloc[-1] / 1000)
+                
                 stock_code = symbol.replace('.TW', '')
                 
                 change_str = "0.00%"
@@ -145,35 +138,42 @@ def get_tw_stocks_status():
 def main():
     print("開始執行策略分析...")
     
-    # 1. 抓取 StockQ
-    nickel_data = get_nickel_price_from_stockq()
+    # 1. 抓取鎳價 (Business Insider)
+    nickel_data = get_nickel_price()
     
-    if not nickel_data:
-        print("❌ 無法抓取鎳價")
-        send_discord_message("⚠️ 錯誤報告: StockQ 爬蟲失敗，請檢查網頁結構。")
-        return
+    # 2. 準備訊息內容
+    # 就算鎳價失敗，我們也要發送不銹鋼股價，不能直接 return
+    
+    message = ""
+    is_bullish = False
+    
+    if nickel_data:
+        # 成功抓到鎳價
+        is_bullish = nickel_data['change_pct'] > 1.0
+        title_emoji = "🔥" if is_bullish else "⚖️"
+        
+        message += f"{title_emoji} **國際鎳價 & 不銹鋼日報** ({nickel_data['date']})\n\n"
+        message += f"**🔩 LME 鎳價 (Business Insider)**\n"
+        message += f"> 現價: `{nickel_data['price']:,.0f}` USD\n"
+        message += f"> 漲跌: `{nickel_data['change_pct']}%`\n"
+        message += f"> 狀態: **{nickel_data['trend']}**\n"
+        message += f"> [查看來源]({NICKEL_URL})\n\n"
+    else:
+        # 抓取失敗 (容錯模式)
+        message += f"⚠️ **不銹鋼日報** (鎳價讀取失敗)\n\n"
+        message += f"**🔩 LME 鎳價**\n"
+        message += f"> 狀態: `暫時無法讀取` (來源網站可能阻擋)\n"
+        message += f"> 建議直接查看: [MoneyDJ鎳價]({NICKEL_URL})\n\n"
 
-    # 2. 判斷訊號
-    is_bullish = nickel_data['change_pct'] > 1.0 # 漲幅超過 1%
-    
-    # 3. 組合訊息
-    title_emoji = "🔥" if is_bullish else "⚖️"
-    
-    message = f"{title_emoji} **倫敦鎳價追蹤日報** ({nickel_data['date']})\n\n"
-    
-    message += f"**🔩 LME 鎳期貨 (StockQ)**\n"
-    message += f"> 收盤價: `{nickel_data['price']:,.0f}` USD/Ton\n"
-    message += f"> 漲跌幅: `{nickel_data['change_pct']}%` ({nickel_data['change_val']})\n"
-    message += f"> 狀態: **{nickel_data['trend']}**\n"
-    message += f"> [查看 StockQ 原圖]({NICKEL_URL})\n\n"
-    
+    # 3. 抓取台股 (這部分最穩定，一定會顯示)
     message += f"**🏭 台灣不銹鋼族群**\n"
     message += "```yaml\n"
     message += get_tw_stocks_status()
     message += "\n```"
     
+    # 4. 只有在鎳價真的大漲時才 @here
     if is_bullish:
-        message = "@here **🔔 鎳價上漲！不銹鋼留意！**\n" + message
+        message = "@here **🔔 鎳價轉強訊號！**\n" + message
 
     send_discord_message(message)
 
