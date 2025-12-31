@@ -1,15 +1,15 @@
 import yfinance as yf
 import requests
 import pandas as pd
-from bs4 import BeautifulSoup
 import os
 
 # --- 設定區 ---
 
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
-# MoneyDJ 倫敦鎳價網址
-NICKEL_URL = "https://www.moneydj.com/z/ze/zeq/zeqa_D0200990.djhtm"
+# 改用 StockQ，它的 HTML 結構非常簡單，適合程式讀取
+# 這是 LME 鎳的專屬頁面
+NICKEL_URL = "https://www.stockq.org/raw/nickel.php"
 
 # 台股不銹鋼概念股
 STOCK_MAP = {
@@ -34,63 +34,67 @@ def send_discord_message(content):
     except Exception as err:
         print(f"Discord 發送失敗: {err}")
 
-def get_nickel_price_from_moneydj():
+def get_nickel_price_from_stockq():
     """
-    從 MoneyDJ 爬取倫敦鎳期貨價
+    從 StockQ 讀取 LME 鎳價 (使用 pandas read_html 強力解析)
     """
     try:
+        # 偽裝成瀏覽器，避免被擋
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(NICKEL_URL, headers=headers, timeout=10)
+        
+        # 1. 下載網頁內容
+        response = requests.get(NICKEL_URL, headers=headers, timeout=15)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.text, 'lxml')
+        # 2. 使用 pandas 自動尋找網頁裡的所有表格
+        # StockQ 的編碼有時是 utf-8 有時是 big5，pandas 通常能自動處理，若亂碼需調整 encoding
+        dfs = pd.read_html(response.text)
         
-        # --- 解析 MoneyDJ 網頁結構 (這部分若網站改版可能會失效) ---
-        # 尋找包含價格的表格
-        # MoneyDJ 的即時報價通常在 id="z_table" 或特定的 class 裡
-        # 這裡我們嘗試抓取頁面上最明顯的報價欄位
+        # 3. 尋找包含數據的那個表格
+        # StockQ 這個頁面的主要數據通常在第一個或第二個表格
+        # 我們直接取長度夠長的那個
+        target_df = None
+        for df in dfs:
+            # 檢查表格欄位是否有 "收盤價" 或 "Close"
+            if len(df) > 1 and df.shape[1] >= 5: # 至少要有幾列幾行
+                target_df = df
+                break
         
-        # 根據 MoneyDJ 結構，報價通常在 t01 類的表格中
-        # 我們直接抓取頁面標題下方的報價數據
-        # 假設結構：<td class="t3n1">16,250.00</td>
-        
-        # 抓取最新價格 (通常是第一個 t3n1 紅色 或 t3n2 綠色)
-        price_element = soup.find('td', class_=['t3n1', 't3n2']) # 嘗試抓取漲或跌的樣式
-        
-        # 為了保險，我們抓取表格中的具體位置
-        # MoneyDJ 頁面表格結構通常固定
-        table = soup.find('table', {'id': 'Ctl00_ContentPlaceHolder1_dt_1'})
-        if not table:
-             # 如果找不到特定 ID，嘗試通用表格
-             print("找不到特定 ID 表格，嘗試通用解析...")
-             return None
-
-        rows = table.find_all('tr')
-        if len(rows) < 2:
+        if target_df is None:
+            print("找不到合適的價格表格")
             return None
-            
-        # 第二行通常是最新數據: 日期 | 收盤 | 漲跌 | 漲跌幅
-        cols = rows[1].find_all('td')
+
+        # StockQ 的表格通常長這樣：
+        # Header: 日期 | 收盤價 | 漲跌 | 漲跌幅 | 開盤 | 最高 ...
+        # Row 0: 2024/05/xx | 19500 | -50 | -0.25% ...
         
-        # 資料解析
-        date_str = cols[0].text.strip()
-        price_str = cols[1].text.strip().replace(',', '')
-        change_val_str = cols[2].text.strip().replace(',', '')
-        change_pct_str = cols[3].text.strip().replace('%', '')
+        # 重新整理欄位名稱 (有些表格第一列是 Header)
+        target_df.columns = target_df.iloc[0] # 設定第一列為標題
+        target_df = target_df[1:] # 刪除第一列資料 (避免重複)
+
+        # 取得最新一筆資料 (通常是第一行)
+        latest_row = target_df.iloc[0]
         
-        current_price = float(price_str)
+        # 解析數據 (欄位名稱可能會變，我們用索引比較保險)
+        # index 0: 日期, 1: 收盤價, 2: 漲跌, 3: 漲跌幅
+        date_str = str(latest_row.iloc[0])
+        price_str = str(latest_row.iloc[1])
+        change_val_str = str(latest_row.iloc[2])
+        change_pct_str = str(latest_row.iloc[3]).replace('%', '')
+        
+        current_price = float(price_str.replace(',', ''))
         change_pct = float(change_pct_str)
         
-        # 判斷趨勢圖示
+        # 判斷趨勢
         trend_icon = "➖ 盤整"
-        if change_pct > 0.5: trend_icon = "📈 轉強"
-        if change_pct > 1.5: trend_icon = "🔥 大漲"
-        if change_pct < -0.5: trend_icon = "📉 轉弱"
+        if change_pct > 1.0: trend_icon = "📈 轉強"
+        if change_pct > 2.0: trend_icon = "🔥 大漲"
+        if change_pct < -1.0: trend_icon = "📉 轉弱"
         
         return {
-            "source": "LME Nickel (MoneyDJ)",
+            "source": "LME Nickel (StockQ)",
             "price": current_price,
             "change_pct": change_pct,
             "change_val": change_val_str,
@@ -99,11 +103,12 @@ def get_nickel_price_from_moneydj():
         }
 
     except Exception as e:
-        print(f"爬取 MoneyDJ 失敗: {e}")
+        print(f"爬取 StockQ 失敗: {e}")
+        # 如果 StockQ 失敗，這裡可以考慮 failover 到其他來源，目前先回報錯誤
         return None
 
 def get_tw_stocks_status():
-    """ 獲取台股狀態 (維持原樣) """
+    """ 獲取台股狀態 (維持不變) """
     table_lines = []
     header = f"{'代號':<5} {'名稱':<4} {'現價':>6}  {'漲跌幅':>7}  {'張數':>5}"
     table_lines.append(header)
@@ -140,28 +145,27 @@ def get_tw_stocks_status():
 def main():
     print("開始執行策略分析...")
     
-    # 1. 嘗試爬取 MoneyDJ
-    nickel_data = get_nickel_price_from_moneydj()
+    # 1. 抓取 StockQ
+    nickel_data = get_nickel_price_from_stockq()
     
-    # 2. 如果爬蟲失敗，我們可能需要一個備案，或直接報錯
     if not nickel_data:
-        print("❌ 無法抓取鎳價，請檢查 MoneyDJ 網頁結構是否改變")
-        send_discord_message("⚠️ 錯誤報告: 無法爬取 MoneyDJ 鎳價資料，請檢查程式。")
+        print("❌ 無法抓取鎳價")
+        send_discord_message("⚠️ 錯誤報告: StockQ 爬蟲失敗，請檢查網頁結構。")
         return
 
-    # 3. 判斷訊號
-    is_bullish = nickel_data['change_pct'] > 1.0 # 漲幅超過 1% 視為強勢
+    # 2. 判斷訊號
+    is_bullish = nickel_data['change_pct'] > 1.0 # 漲幅超過 1%
     
-    # 4. 組合訊息
+    # 3. 組合訊息
     title_emoji = "🔥" if is_bullish else "⚖️"
     
     message = f"{title_emoji} **倫敦鎳價追蹤日報** ({nickel_data['date']})\n\n"
     
-    message += f"**🔩 LME 鎳期貨 (MoneyDJ)**\n"
-    message += f"> 收盤價: `{nickel_data['price']:,.0f}` USD/Ton\n" # 加千分位
+    message += f"**🔩 LME 鎳期貨 (StockQ)**\n"
+    message += f"> 收盤價: `{nickel_data['price']:,.0f}` USD/Ton\n"
     message += f"> 漲跌幅: `{nickel_data['change_pct']}%` ({nickel_data['change_val']})\n"
     message += f"> 狀態: **{nickel_data['trend']}**\n"
-    message += f"> [查看圖表]({NICKEL_URL})\n\n"
+    message += f"> [查看 StockQ 原圖]({NICKEL_URL})\n\n"
     
     message += f"**🏭 台灣不銹鋼族群**\n"
     message += "```yaml\n"
