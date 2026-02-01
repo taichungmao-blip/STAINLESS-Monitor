@@ -70,7 +70,6 @@ def generate_nickel_chart():
         return None
 
 def send_discord_message(content, image_file=None):
-    """ 支援文字與圖片同時發送的 Discord Webhook """
     if not DISCORD_WEBHOOK_URL:
         print("⚠️ 未設定 Discord Webhook URL")
         return
@@ -79,15 +78,22 @@ def send_discord_message(content, image_file=None):
     
     try:
         if image_file:
-            # 同時傳送檔案時，文字內容需包在 payload_json 中
-            files = {'file': ('nickel_chart.png', image_file, 'image/png')}
+            # 確保檔案指針在開頭
+            image_file.seek(0)
+            # 使用 'file' 作為 Key 是 Discord 的標準要求
+            files = {
+                'file': ('nickel_chart.png', image_file, 'image/png')
+            }
+            # 注意：這裡使用 data 傳送 payload_json，使用 files 傳送圖片
             res = requests.post(
                 DISCORD_WEBHOOK_URL, 
                 data={'payload_json': json.dumps(payload)}, 
-                files=files
+                files=files,
+                timeout=30
             )
         else:
-            res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+            res = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
+        
         res.raise_for_status()
         print("Discord 發送成功")
     except Exception as err:
