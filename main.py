@@ -1,47 +1,61 @@
 import yfinance as yf
 import requests
 import os
-import io  # 用於在記憶體中處理圖片，不需產生實體檔案
+import io
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
 from datetime import datetime
+import json
 
 # --- 設定區 ---
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 NICKEL_URL = "https://markets.businessinsider.com/commodities/nickel-price"
-TREND_PROXY_TICKER = "DBB"
-# 鎳價期貨代號，Yahoo Finance 通常使用 'NI=F' (LME Nickel)
-NICKEL_TICKER = "NI=F" 
+TREND_PROXY_TICKER = "DBB"  
+NICKEL_TICKER = "NI=F"      
 
+# 已加入 唐榮 (2035)，燁聯 (9957) 若有報價異常會自動跳過
 STOCK_LIST = [
     {"id": "2025.TW", "name": "千興", "tag": "小型飆股"},
     {"id": "2030.TW", "name": "彰源", "tag": "庫存利得"},
     {"id": "1605.TW", "name": "華新", "tag": "鎳礦資源"},
     {"id": "2034.TW", "name": "允強", "tag": "製造龍頭"},
     {"id": "2027.TW", "name": "大成鋼", "tag": "美鋁通路"},
+    {"id": "2035.TW", "name": "唐榮", "tag": "官股代表"},
+    {"id": "9957.TW", "name": "燁聯", "tag": "不銹鋼龍頭"}
 ]
 
 # --- 函數區 ---
 
 def generate_nickel_chart():
-    """ 抓取一年鎳價並生成走勢圖 (回傳 BytesIO 物件) """
+    """ 抓取一年鎳價並生成深色專業風格走勢圖 """
     try:
-        # 下載一年資料
         data = yf.download(NICKEL_TICKER, period="1y", interval="1d", progress=False)
         if data.empty:
             return None
 
-        plt.figure(figsize=(10, 5))
-        plt.plot(data.index, data['Close'], color='#2ecc71', linewidth=2)
-        plt.title(f"Nickel Price (LME) - Last 12 Months", fontsize=14)
-        plt.xlabel("Date")
-        plt.ylabel("USD / Ton")
-        plt.grid(True, linestyle='--', alpha=0.7)
-        plt.tight_layout()
+        # 設定深色背景風格，適合 Discord 深色模式
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        # 繪製線條
+        ax.plot(data.index, data['Close'], color='#00d2ff', linewidth=2, label='Nickel Price')
+        ax.fill_between(data.index, data['Close'], color='#00d2ff', alpha=0.1) # 加入漸層感
+        
+        # 標註最新價格
+        last_price = data['Close'].iloc[-1]
+        ax.axhline(last_price, color='red', linestyle='--', alpha=0.5)
+        ax.text(data.index[0], last_price, f' Latest: {last_price:.0f}', color='red', fontweight='bold')
 
-        # 將圖片儲存在記憶體中，避免產生臨時檔案
+        ax.set_title(f"Nickel Price (LME) 1-Year Trend View", fontsize=14, pad=20)
+        ax.set_ylabel("USD / Ton")
+        ax.grid(True, linestyle=':', alpha=0.3)
+        
+        # 移除邊框
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
         img_objs = io.BytesIO()
-        plt.savefig(img_objs, format='png')
+        plt.savefig(img_objs, format='png', facecolor='#2c2f33') # Discord 背景色
         img_objs.seek(0)
         plt.close()
         return img_objs
@@ -50,81 +64,89 @@ def generate_nickel_chart():
         return None
 
 def send_discord_message(content, image_file=None):
-    """ 修改後的發送函數：支援同時發送文字與圖片 """
     if not DISCORD_WEBHOOK_URL:
         print("⚠️ 未設定 Discord Webhook URL")
         return
-    
     payload = {"content": content, "username": "不銹鋼戰情室"}
-    
     try:
         if image_file:
-            # 如果有圖片，使用 multipart/form-data 格式
-            files = {
-                'file': ('nickel_chart.png', image_file, 'image/png')
-            }
-            # 注意：發送檔案時 payload 需放入 'payload_json'
-            import json
+            files = {'file': ('nickel_chart.png', image_file, 'image/png')}
             res = requests.post(DISCORD_WEBHOOK_URL, data={'payload_json': json.dumps(payload)}, files=files)
         else:
             res = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-            
         res.raise_for_status()
         print("Discord 發送成功")
     except Exception as err:
         print(f"Discord 發送失敗: {err}")
 
-# (其餘 get_nickel_price, get_market_trend, get_tw_stocks_status 保持不變)
-# ... [保留你原本的 get_nickel_price, get_market_trend, get_tw_stocks_status] ...
+def get_nickel_price():
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(NICKEL_URL, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        price_div = soup.find('span', class_='price-section__current-value') or soup.find('span', class_='push-data')
+        if not price_div: return None
+        current_price = float(price_div.text.replace(',', ''))
+        change_pct = 0.0
+        try:
+            pct_div = soup.find('span', class_='price-section__relative-value')
+            if pct_div: change_pct = float(pct_div.text.replace('%', '').strip())
+        except: pass 
+        return {"price": current_price, "change_pct": change_pct}
+    except Exception as e:
+        print(f"爬取鎳價失敗: {e}")
+        return None
+
+def get_market_trend():
+    try:
+        etf = yf.Ticker(TREND_PROXY_TICKER)
+        hist = etf.history(period="4mo")
+        if len(hist) < 60: return None
+        price = hist['Close'].iloc[-1]
+        ma20 = hist['Close'].tail(20).mean()
+        ma60 = hist['Close'].tail(60).mean()
+        status = "盤整中 ⚖️"
+        if price > ma20 and ma20 > ma60: status = "多頭排列 (強勢) 🚀"
+        elif price > ma20 and ma20 < ma60: status = "站上月線 (反彈) 📈"
+        elif price < ma20 and ma20 < ma60: status = "空頭排列 (弱勢) 🐻"
+        elif price < ma20 and ma20 > ma60: status = "跌破月線 (整理) 📉"
+        return {"status": status}
+    except: return None
+
+def get_tw_stocks_status():
+    table_lines = []
+    header = f"{'代號':<5} {'名稱':<4} {'現價':>6} {'漲跌%':>7} {'特性'}"
+    table_lines.append(header)
+    table_lines.append("-" * 42)
+    for stock_info in STOCK_LIST:
+        try:
+            stock = yf.Ticker(stock_info['id'])
+            data = stock.history(period="2d")
+            if not data.empty:
+                price = data['Close'].iloc[-1]
+                change_str = "0.00%"
+                if len(data) >= 2:
+                    prev = data['Close'].iloc[-2]
+                    change = ((price - prev) / prev) * 100
+                    change_str = f"{'+' if change > 0 else ''}{change:.2f}%"
+                table_lines.append(f"{stock_info['id'].split('.')[0]:<5} {stock_info['name']:<4} {price:>6.2f} {change_str:>7}  {stock_info['tag']}")
+        except: continue
+    return "\n".join(table_lines)
 
 def main():
     print("開始執行策略分析...")
-    
     nickel_data = get_nickel_price()
     market_trend = get_market_trend()
-    chart_img = generate_nickel_chart() # 生成圖表
+    chart_img = generate_nickel_chart()
     
-    message = ""
-    # 判斷整體氣氛
-    is_bullish_price = nickel_data and nickel_data['change_pct'] > 1.0
-    is_bullish_trend = market_trend and "多頭" in market_trend['status']
-    
-    title_emoji = "🔥" if (is_bullish_price and is_bullish_trend) else "📊"
-    message += f"{title_emoji} **鎳價策略戰情室** ({datetime.now().strftime('%Y-%m-%d')})\n\n"
-
-    # --- 1. 即時報價區 ---
+    message = f"📊 **不銹鋼產業戰情室** ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n"
     if nickel_data:
         pct_sign = "🔺" if nickel_data['change_pct'] > 0 else "🔻"
-        message += f"**🔩 LME 鎳價 (Spot)**\n"
-        message += f"> 現價: `{nickel_data['price']:,.0f}` USD\n"
-        message += f"> 漲跌: `{pct_sign} {nickel_data['change_pct']}%`\n"
-    else:
-        message += f"**🔩 LME 鎳價**: `讀取失敗`\n"
-
-    # --- 2. 技術趨勢區 ---
+        message += f"**🔩 LME 鎳價 (Spot)**\n> 現價: `{nickel_data['price']:,.0f}` USD\n> 漲跌: `{pct_sign} {nickel_data['change_pct']}%`\n"
     if market_trend:
-        message += f"**🌊 原物料趨勢 (DBB ETF)**\n"
-        message += f"> 狀態: **{market_trend['status']}**\n"
-        message += f"> 策略: "
-        if "多頭" in market_trend['status']: message += "`順勢做多` ✅\n"
-        elif "站上月線" in market_trend['status']: message += "`反彈行情` ⚠️\n"
-        elif "空頭" in market_trend['status']: message += "`保守觀望` ⛔\n"
-        else: message += "`區間震盪` 🔄\n"
-    message += "\n"
-
-    # --- 3. 台股區 ---
-    message += f"**🏭 不銹鋼個股表現**\n"
-    message += "```yaml\n"
-    message += get_tw_stocks_status()
-    message += "\n```"
+        message += f"**🌊 趨勢判斷**: **{market_trend['status']}**\n"
+    message += f"\n**🏭 不銹鋼個股表現**\n```yaml\n{get_tw_stocks_status()}\n```"
     
-    # --- 4. 訊號總結 ---
-    if is_bullish_price and is_bullish_trend:
-        message = "@here **🚀 強力訊號：鎳價大漲 + 趨勢多頭！**\n" + message
-    elif is_bullish_price and not is_bullish_trend:
-        message = "@here **⚠️ 注意：鎳價反彈，但大趨勢仍偏空**\n" + message
-
-    # 發送訊息與圖表
     send_discord_message(message, image_file=chart_img)
 
 if __name__ == "__main__":
