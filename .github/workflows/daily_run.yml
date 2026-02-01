@@ -2,10 +2,9 @@ name: Nickel & Stainless Steel Strategy Tracker
 
 on:
   schedule:
-    # 每天 UTC 時間 09:00 (台灣時間下午 17:00，收盤後執行)
-    # 你可以依需求調整，例如開盤前 00:30 UTC (台灣 08:30)
-    - cron: '25 21 * * 1-5' # 週一到週五執行
-  workflow_dispatch: # 允許手動按按鈕測試
+    # 每天 UTC 時間 21:25 (台灣時間隔天早上 05:25，剛好涵蓋美股/LME 收盤)
+    - cron: '25 21 * * 1-5' 
+  workflow_dispatch: # 允許手動執行測試
 
 jobs:
   build:
@@ -19,13 +18,20 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
+        cache: 'pip' # 加入快取功能，加快後續執行速度
 
     - name: Install dependencies
       run: |
-        pip install -r requirements.txt matplotlib
+        python -m pip install --upgrade pip
+        # 確保安裝所有必要套件
+        pip install yfinance requests beautifulsoup4 matplotlib
+        # 如果你有 requirements.txt，也可以並行使用：
+        # if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
     - name: Run Strategy Script
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        # 設定 MPLBACKEND 為 Agg，防止 matplotlib 嘗試開啟 GUI 視窗導致錯誤
+        MPLBACKEND: Agg 
       run: |
         python main.py
