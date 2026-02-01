@@ -23,14 +23,11 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 這裡移除手動 pip install，改為統一使用 requirements.txt
         pip install -r requirements.txt
 
     - name: Run Strategy Script
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        # 確保環境變數正確傳遞
         MPLBACKEND: Agg 
       run: |
-        # 增加一個 debug 指令，確認圖片是否有生成
         python main.py
